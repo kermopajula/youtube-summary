@@ -105,6 +105,8 @@ The API returns appropriate error messages and status codes:
 
 ## Deployment
 
+### Manual Deployment
+
 Deploy to Vercel:
 
 ```
@@ -115,4 +117,16 @@ Or directly with the Vercel CLI:
 
 ```
 vercel
-``` 
+```
+
+### GitHub Integration
+
+This project can be set up for automatic deployment through GitHub:
+
+1. Push your code to GitHub
+2. Connect your repository to Vercel
+3. Each push to the main branch will automatically trigger a new deployment
+
+### Environment Variables
+
+No environment variables are required for this project. 
