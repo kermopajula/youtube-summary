@@ -1,0 +1,12 @@
+{
+  "name": "youtube-summary",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "local": "vercel dev",
+    "deploy": "vercel deploy"
+  },
+  "dependencies": {
+    "youtube-transcript": "^1.0.6"
+  }
+} 

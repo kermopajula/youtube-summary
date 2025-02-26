@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/transcript",
+      "dest": "/api/transcript.js",
+      "methods": ["GET"]
+    }
+  ]
+} 
