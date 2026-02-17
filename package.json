@@ -7,6 +7,6 @@
     "deploy": "vercel deploy"
   },
   "dependencies": {
-    "youtube-transcript": "^1.0.6"
+    "@danielxceron/youtube-transcript": "^1.2.6"
   }
-} 
+}
