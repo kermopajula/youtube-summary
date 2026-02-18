@@ -9,40 +9,22 @@ const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
 const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY';
 
 /**
- * Extract captions object from YouTube watch page HTML.
- */
-function extractCaptionsFromHtml(html) {
-  const parts = html.split('"captions":');
-  if (parts.length <= 1) {
-    if (html.includes('class="g-recaptcha"')) {
-      throw new Error('Rate limited by YouTube (CAPTCHA required)');
-    }
-    return null;
-  }
-
-  try {
-    const captionsJson = parts[1].split(',"videoDetails')[0].replace('\n', '');
-    const captions = JSON.parse(captionsJson)?.playerCaptionsTracklistRenderer;
-    if (!captions?.captionTracks?.length) return null;
-    return captions;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Fetch transcript XML from a caption track URL and parse it.
  */
-async function fetchTranscriptFromCaptions(captions) {
-  const track = captions.captionTracks.find((t) => t.kind === 'asr') || captions.captionTracks[0];
-  const response = await fetch(track.baseUrl);
+async function fetchTranscriptFromTrackUrl(trackUrl, lang) {
+  const response = await fetch(trackUrl);
 
   if (!response.ok) {
     throw new Error(`Transcript XML fetch failed: ${response.status}`);
   }
 
   const body = await response.text();
-  const transcript = parseTranscriptXml(body, track.languageCode);
+
+  if (!body.length) {
+    throw new Error('Transcript response is empty');
+  }
+
+  const transcript = parseTranscriptXml(body, lang || 'en');
 
   if (!transcript.length) {
     throw new Error('Parsed transcript is empty');
@@ -52,41 +34,47 @@ async function fetchTranscriptFromCaptions(captions) {
 }
 
 /**
- * Server-side fetch: try to get captions directly from YouTube.
- * This works from residential IPs but may fail from datacenter IPs.
+ * Extract caption track info from an InnerTube player API response.
  */
-async function fetchTranscriptServerSide(videoId) {
-  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Cookie': CONSENT_COOKIE,
-    },
-  });
-
-  const html = await response.text();
-  const captions = extractCaptionsFromHtml(html);
-
-  if (!captions) {
-    throw new Error('No captions in page (YouTube may be blocking this server IP)');
+function extractTrackFromPlayerResponse(data) {
+  const captions = data?.captions?.playerCaptionsTracklistRenderer;
+  if (!captions?.captionTracks?.length) {
+    throw new Error('No caption tracks in player response');
   }
 
-  return await fetchTranscriptFromCaptions(captions);
+  const track = captions.captionTracks.find((t) => t.kind === 'asr') || captions.captionTracks[0];
+  return { url: track.baseUrl, lang: track.languageCode };
 }
 
 /**
- * Client-assisted fetch: parse captions from HTML provided by the client.
- * The client fetches the YouTube page from their residential IP and POSTs
- * the HTML here. The timedtext URLs are signed and work from any IP.
+ * Server-side: fetch captions directly from YouTube.
+ * Works from residential IPs but fails from datacenter IPs.
  */
-async function fetchTranscriptFromClientHtml(html) {
-  const captions = extractCaptionsFromHtml(html);
+async function fetchTranscriptServerSide(videoId) {
+  // Try InnerTube ANDROID client
+  const response = await fetch('https://www.youtube.com/youtubei/v1/player', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; Android 13)',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '19.29.37',
+          androidSdkVersion: 33,
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+      videoId,
+    }),
+  });
 
-  if (!captions) {
-    throw new Error('No captions found in provided HTML');
-  }
-
-  return await fetchTranscriptFromCaptions(captions);
+  const data = await response.json();
+  const track = extractTrackFromPlayerResponse(data);
+  return await fetchTranscriptFromTrackUrl(track.url, track.lang);
 }
 
 function parseTranscriptXml(body, lang) {
@@ -138,23 +126,34 @@ export default async function handler(req) {
   const url = new URL(req.url);
   const format = url.searchParams.get('format') || 'json';
 
-  // POST: client sends YouTube page HTML for parsing
+  /**
+   * POST mode: client sends YouTube InnerTube player API response.
+   *
+   * The client (e.g. Apple Shortcuts) should:
+   * 1. POST to https://www.youtube.com/youtubei/v1/player with:
+   *    {"context":{"client":{"clientName":"ANDROID","clientVersion":"19.29.37","androidSdkVersion":33,"hl":"en","gl":"US"}},"videoId":"VIDEO_ID"}
+   * 2. Forward that response body here as a POST.
+   *
+   * This works because the client has a residential IP that YouTube trusts,
+   * and the timedtext URLs in the response are signed but not IP-bound.
+   */
   if (req.method === 'POST') {
     try {
-      const html = await req.text();
-
-      if (!html || html.length < 1000) {
-        return jsonResponse({ error: 'POST body must contain YouTube page HTML' }, 400);
+      const body = await req.text();
+      if (!body) {
+        return jsonResponse({ error: 'POST body required' }, 400);
       }
 
-      const transcript = await fetchTranscriptFromClientHtml(html);
+      const data = JSON.parse(body);
+      const track = extractTrackFromPlayerResponse(data);
+      const transcript = await fetchTranscriptFromTrackUrl(track.url, track.lang);
       return transcriptResponse(transcript, format);
     } catch (error) {
       return jsonResponse({ error: 'Failed to fetch transcript', details: error.message }, 500);
     }
   }
 
-  // GET: server fetches directly from YouTube (may fail from datacenter IPs)
+  // GET mode: server fetches directly (may fail from datacenter IPs)
   if (req.method === 'GET') {
     const videoUrl = url.searchParams.get('url');
     const videoId = url.searchParams.get('id');
@@ -177,7 +176,7 @@ export default async function handler(req) {
       return jsonResponse({
         error: 'Failed to fetch transcript',
         details: error.message,
-        hint: 'YouTube blocks server IPs. Use POST with the YouTube page HTML instead. Have your client fetch https://www.youtube.com/watch?v=VIDEO_ID and POST the HTML body here.',
+        hint: 'YouTube blocks server IPs. Use POST mode: have your client call the YouTube InnerTube API and forward the response here.',
       }, 500);
     }
   }
