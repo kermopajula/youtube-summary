@@ -1,27 +1,23 @@
-export const config = {
-  runtime: 'edge'
-};
+import Innertube from 'youtubei.js';
 
 const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
 const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
 
-// Consent cookie to bypass YouTube's consent page on datacenter IPs
 const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY';
 
 async function fetchTranscript(videoId) {
   const errors = [];
 
-  // Step 1: Fetch the embed page (works reliably from datacenter IPs)
-  // and use it to make an embedded player InnerTube request
+  // Step 1: Use youtubei.js (handles session generation and multiple API paths)
   try {
-    const result = await fetchViaEmbed(videoId);
+    const result = await fetchViaYoutubei(videoId);
     if (result.length) return result;
   } catch (err) {
-    errors.push(`Embed: ${err.message}`);
+    errors.push(`youtubei.js: ${err.message}`);
   }
 
-  // Step 2: Fetch the watch page for captions and visitor data
+  // Step 2: Fetch the watch page for embedded captions
   let pageData = null;
   try {
     pageData = await fetchWatchPage(videoId);
@@ -29,7 +25,6 @@ async function fetchTranscript(videoId) {
     errors.push(`Page fetch: ${err.message}`);
   }
 
-  // Try captions extracted directly from the page HTML
   if (pageData?.captions) {
     try {
       const result = await fetchTranscriptFromCaptions(pageData.captions);
@@ -39,7 +34,7 @@ async function fetchTranscript(videoId) {
     }
   }
 
-  // Step 3: Try InnerTube WEB client with visitor data from the page
+  // Step 3: Try InnerTube WEB client with visitor data
   try {
     const result = await fetchViaInnerTubeClient(videoId, {
       clientName: 'WEB',
@@ -68,62 +63,30 @@ async function fetchTranscript(videoId) {
   throw new Error(`All methods failed for ${videoId}: ${errors.join('; ')}`);
 }
 
-async function fetchViaEmbed(videoId) {
-  // Fetch the embed page — YouTube serves this to all IPs since embeds
-  // must work on any third-party site
-  const embedResponse = await fetch(`https://www.youtube.com/embed/${videoId}`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    },
-  });
+async function fetchViaYoutubei(videoId) {
+  const yt = await Innertube.create({ generate_session_locally: true });
+  const info = await yt.getInfo(videoId);
+  const transcriptInfo = await info.getTranscript();
 
-  const embedHtml = await embedResponse.text();
+  const segments = transcriptInfo.transcript?.content?.body?.initial_segments || [];
 
-  // Extract visitor data and API key from embed page
-  const visitorMatch = embedHtml.match(/"visitorData"\s*:\s*"([^"]+)"/);
-  const visitorData = visitorMatch?.[1];
-
-  const apiKeyMatch = embedHtml.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
-  const apiKey = apiKeyMatch?.[1] || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
-
-  if (!visitorData) {
-    throw new Error('No visitor data in embed page');
+  if (!segments.length) {
+    throw new Error('No transcript segments found');
   }
 
-  // Make InnerTube request as an embedded player (mimics what the embed iframe does)
-  const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Referer': 'https://www.youtube.com/',
-      'Origin': 'https://www.youtube.com',
-    },
-    body: JSON.stringify({
-      context: {
-        client: {
-          clientName: 'WEB_EMBEDDED_PLAYER',
-          clientVersion: '1.20241126.01.00',
-          visitorData,
-          hl: 'en',
-          gl: 'US',
-        },
-        thirdParty: {
-          embedUrl: 'https://www.google.com',
-        },
-      },
-      videoId,
-    }),
-  });
-
-  const data = await response.json();
-  const captions = data?.captions?.playerCaptionsTracklistRenderer;
-
-  if (!captions || !captions.captionTracks?.length) {
-    throw new Error('No captions in response');
-  }
-
-  return await fetchTranscriptFromCaptions(captions);
+  return segments
+    .map((seg) => {
+      const renderer = seg.as?.('TranscriptSegment') || seg;
+      const text = renderer.snippet?.text || renderer.snippet?.runs?.map((r) => r.text).join('') || '';
+      if (!text.trim()) return null;
+      return {
+        text: text.trim(),
+        duration: (Number(renderer.end_ms || 0) - Number(renderer.start_ms || 0)) / 1000,
+        offset: Number(renderer.start_ms || 0) / 1000,
+        lang: 'en',
+      };
+    })
+    .filter(Boolean);
 }
 
 async function fetchWatchPage(videoId) {
@@ -141,14 +104,12 @@ async function fetchWatchPage(videoId) {
     throw new Error('Rate limited by YouTube (CAPTCHA required)');
   }
 
-  // Extract visitor data for use in InnerTube requests
   let visitorData = null;
   const visitorMatch = html.match(/"visitorData"\s*:\s*"([^"]+)"/);
   if (visitorMatch) {
     visitorData = visitorMatch[1];
   }
 
-  // Extract captions from embedded player response
   let captions = null;
   const captionsParts = html.split('"captions":');
   if (captionsParts.length > 1) {
@@ -159,7 +120,7 @@ async function fetchWatchPage(videoId) {
         captions = null;
       }
     } catch {
-      // Failed to parse, captions stays null
+      // Failed to parse
     }
   }
 
@@ -204,7 +165,7 @@ async function fetchViaInnerTubeClient(videoId, clientConfig) {
 }
 
 async function fetchTranscriptFromCaptions(captions) {
-  const track = captions.captionTracks.find(t => t.kind === 'asr') || captions.captionTracks[0];
+  const track = captions.captionTracks.find((t) => t.kind === 'asr') || captions.captionTracks[0];
   const response = await fetch(track.baseUrl);
 
   if (!response.ok) {
@@ -225,22 +186,22 @@ function parseTranscriptXml(body, lang) {
   const results = [...body.matchAll(RE_XML_TRANSCRIPT)];
   if (results.length) {
     return results
-      .map(result => ({
+      .map((result) => ({
         text: decodeHTMLEntities(result[3]),
         duration: parseFloat(result[2]),
         offset: parseFloat(result[1]),
         lang,
       }))
-      .filter(item => item.text.trim() !== '');
+      .filter((item) => item.text.trim() !== '');
   }
 
   const asrResults = [...body.matchAll(RE_XML_TRANSCRIPT_ASR)];
   return asrResults
-    .map(block => {
+    .map((block) => {
       const segments = [...block[3].matchAll(RE_XML_TRANSCRIPT_ASR_SEGMENT)];
       let text;
       if (segments.length) {
-        text = segments.map(s => s[1]).join('').trim();
+        text = segments.map((s) => s[1]).join('').trim();
       } else {
         text = block[3].replace(/<[^>]*>/g, '').trim();
       }
@@ -266,18 +227,14 @@ function decodeHTMLEntities(text) {
     .replace(/&#x27;/g, "'");
 }
 
-export default async function handler(req) {
+export default async function handler(req, res) {
   if (req.method !== 'GET') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const url = new URL(req.url);
-  const videoUrl = url.searchParams.get('url');
-  const videoId = url.searchParams.get('id');
-  const format = url.searchParams.get('format') || 'json';
+  const videoUrl = req.query.url;
+  const videoId = req.query.id;
+  const format = req.query.format || 'json';
 
   let targetVideoId = null;
 
@@ -288,52 +245,28 @@ export default async function handler(req) {
   }
 
   if (!targetVideoId) {
-    return new Response(JSON.stringify({ error: 'Valid YouTube URL or video ID is required' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return res.status(400).json({ error: 'Valid YouTube URL or video ID is required' });
   }
 
   try {
     const transcript = await fetchTranscript(targetVideoId);
 
+    res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=600');
+
     if (format.toLowerCase() === 'text') {
-      const textTranscript = formatTranscriptAsText(transcript);
-      return new Response(textTranscript, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=600',
-        },
-      });
+      const textTranscript = transcript.map((s) => s.text).join(' ');
+      res.setHeader('Content-Type', 'text/plain');
+      return res.status(200).send(textTranscript);
     } else {
-      return new Response(JSON.stringify({ transcript }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=600',
-        },
-      });
+      return res.status(200).json({ transcript });
     }
   } catch (error) {
     console.error('Error fetching transcript:', error);
-
-    return new Response(
-      JSON.stringify({
-        error: 'Failed to fetch transcript',
-        details: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    return res.status(500).json({
+      error: 'Failed to fetch transcript',
+      details: error.message,
+    });
   }
-}
-
-function formatTranscriptAsText(transcript) {
-  return transcript
-    .map(segment => segment.text)
-    .join(' ');
 }
 
 export function getYoutubeVideoId(url) {
