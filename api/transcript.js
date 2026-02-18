@@ -144,7 +144,9 @@ export default async function handler(req) {
         return jsonResponse({ error: 'POST body required' }, 400);
       }
 
-      const data = JSON.parse(body);
+      const parsed = JSON.parse(body);
+      // Support both direct response and wrapped (e.g. {"player_response": ...} from Apple Shortcuts)
+      const data = parsed.player_response || parsed;
       const track = extractTrackFromPlayerResponse(data);
       const transcript = await fetchTranscriptFromTrackUrl(track.url, track.lang);
       return transcriptResponse(transcript, format);
