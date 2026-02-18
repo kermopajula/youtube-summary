@@ -6,7 +6,7 @@ const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
 const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
 
-const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY';
+const CONSENT_COOKIE = 'SOCS=CAI';
 
 /**
  * Fetch transcript XML from a caption track URL and parse it.
@@ -132,13 +132,13 @@ export default async function handler(req) {
    * The client (e.g. Apple Shortcuts) should:
    * 1. POST to https://www.youtube.com/youtubei/v1/player with:
    *    - Headers: Content-Type: application/json
-   *              Cookie: SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY
-   *    - Body: {"context":{"client":{"clientName":"WEB","clientVersion":"2.20240726.00.00","hl":"en","gl":"US"}},"videoId":"VIDEO_ID","contentCheckOk":true,"racyCheckOk":true}
+   *              Cookie: SOCS=CAI
+   *    - Body: {"context":{"client":{"clientName":"ANDROID","clientVersion":"19.29.37","androidSdkVersion":33,"hl":"en","gl":"US"}},"videoId":"VIDEO_ID"}
    * 2. Forward that response body here as a POST.
    *
    * Notes:
-   * - Uses WEB client (not ANDROID) because ANDROID ignores the SOCS consent cookie.
-   * - The SOCS cookie is required to bypass GDPR consent for EU users.
+   * - ANDROID client is the only one that returns captions without PoToken.
+   * - Cookie SOCS=CAI bypasses GDPR consent for EU users (yt-dlp approach).
    * - This works because the client has a residential IP that YouTube trusts,
    *   and the timedtext URLs in the response are signed but not IP-bound.
    */
@@ -161,7 +161,7 @@ export default async function handler(req) {
         return jsonResponse({
           error: 'GDPR consent page received instead of video data',
           details: 'YouTube returned a consent page. This typically happens when using the ANDROID client from EU IPs.',
-          fix: 'Switch to WEB client and add SOCS consent cookie. Use clientName "WEB", clientVersion "2.20240726.00.00", and set Cookie header to: SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY',
+          fix: 'Add Cookie header "SOCS=CAI" to your YouTube InnerTube request to bypass GDPR consent.',
         }, 400);
       }
 
