@@ -5,8 +5,5 @@
   "scripts": {
     "local": "vercel dev",
     "deploy": "vercel deploy"
-  },
-  "dependencies": {
-    "youtubei.js": "^16.0.1"
   }
 }
