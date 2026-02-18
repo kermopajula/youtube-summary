@@ -1,8 +1,160 @@
-import { YoutubeTranscript } from '@danielxceron/youtube-transcript';
-
 export const config = {
   runtime: 'edge'
 };
+
+const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
+const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
+const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
+
+async function fetchTranscript(videoId) {
+  const errors = [];
+
+  // Try InnerTube ANDROID client (most reliable for captions)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await fetchViaInnerTube(videoId);
+      if (result.length) return result;
+    } catch (err) {
+      errors.push(`InnerTube attempt ${attempt + 1}: ${err.message}`);
+    }
+  }
+
+  // Fall back to HTML scraping (different network path)
+  try {
+    const result = await fetchViaHtmlScraping(videoId);
+    if (result.length) return result;
+  } catch (err) {
+    errors.push(`HTML scraping: ${err.message}`);
+  }
+
+  throw new Error(`All methods failed for ${videoId}: ${errors.join('; ')}`);
+}
+
+async function fetchViaInnerTube(videoId) {
+  const response = await fetch('https://www.youtube.com/youtubei/v1/player', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; Android 13)',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '19.29.37',
+          androidSdkVersion: 33,
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+      videoId,
+    }),
+  });
+
+  const data = await response.json();
+  const captions = data?.captions?.playerCaptionsTracklistRenderer;
+
+  if (!captions || !captions.captionTracks?.length) {
+    throw new Error('No captions in response');
+  }
+
+  return await fetchTranscriptFromCaptions(captions);
+}
+
+async function fetchViaHtmlScraping(videoId) {
+  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+  });
+
+  const html = await response.text();
+  const parts = html.split('"captions":');
+
+  if (parts.length <= 1) {
+    if (html.includes('class="g-recaptcha"')) {
+      throw new Error('Rate limited by YouTube (CAPTCHA required)');
+    }
+    throw new Error('No captions found in page HTML');
+  }
+
+  let captions;
+  try {
+    const captionsJson = parts[1].split(',"videoDetails')[0].replace('\n', '');
+    captions = JSON.parse(captionsJson)?.playerCaptionsTracklistRenderer;
+  } catch {
+    throw new Error('Failed to parse captions from HTML');
+  }
+
+  if (!captions || !captions.captionTracks?.length) {
+    throw new Error('No caption tracks in parsed HTML');
+  }
+
+  return await fetchTranscriptFromCaptions(captions);
+}
+
+async function fetchTranscriptFromCaptions(captions) {
+  const track = captions.captionTracks.find(t => t.kind === 'asr') || captions.captionTracks[0];
+  const response = await fetch(track.baseUrl);
+
+  if (!response.ok) {
+    throw new Error(`Transcript XML fetch failed: ${response.status}`);
+  }
+
+  const body = await response.text();
+  const transcript = parseTranscriptXml(body, track.languageCode);
+
+  if (!transcript.length) {
+    throw new Error('Parsed transcript is empty');
+  }
+
+  return transcript;
+}
+
+function parseTranscriptXml(body, lang) {
+  const results = [...body.matchAll(RE_XML_TRANSCRIPT)];
+  if (results.length) {
+    return results
+      .map(result => ({
+        text: decodeHTMLEntities(result[3]),
+        duration: parseFloat(result[2]),
+        offset: parseFloat(result[1]),
+        lang,
+      }))
+      .filter(item => item.text.trim() !== '');
+  }
+
+  const asrResults = [...body.matchAll(RE_XML_TRANSCRIPT_ASR)];
+  return asrResults
+    .map(block => {
+      const segments = [...block[3].matchAll(RE_XML_TRANSCRIPT_ASR_SEGMENT)];
+      let text;
+      if (segments.length) {
+        text = segments.map(s => s[1]).join('').trim();
+      } else {
+        text = block[3].replace(/<[^>]*>/g, '').trim();
+      }
+      if (!text) return null;
+      return {
+        text: decodeHTMLEntities(text),
+        duration: Number(block[2]) / 1000,
+        offset: Number(block[1]) / 1000,
+        lang,
+      };
+    })
+    .filter(Boolean);
+}
+
+function decodeHTMLEntities(text) {
+  if (!text) return '';
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'");
+}
 
 export default async function handler(req) {
   if (req.method !== 'GET') {
@@ -16,10 +168,9 @@ export default async function handler(req) {
   const videoUrl = url.searchParams.get('url');
   const videoId = url.searchParams.get('id');
   const format = url.searchParams.get('format') || 'json';
-  
+
   let targetVideoId = null;
 
-  // Check if we have a URL or direct video ID
   if (videoUrl) {
     targetVideoId = getYoutubeVideoId(videoUrl);
   } else if (videoId) {
@@ -34,9 +185,8 @@ export default async function handler(req) {
   }
 
   try {
-    const transcript = await YoutubeTranscript.fetchTranscriptWithInnerTube(targetVideoId);
+    const transcript = await fetchTranscript(targetVideoId);
 
-    // Format response based on the format parameter
     if (format.toLowerCase() === 'text') {
       const textTranscript = formatTranscriptAsText(transcript);
       return new Response(textTranscript, {
@@ -70,35 +220,23 @@ export default async function handler(req) {
   }
 }
 
-// Format transcript array into readable text
 function formatTranscriptAsText(transcript) {
   return transcript
-    .map(segment => {
-      // Clean up HTML entities in the text (like &amp;#39; for apostrophe)
-      return segment.text
-        .replace(/&amp;#39;/g, "'")
-        .replace(/&amp;quot;/g, '"')
-        .replace(/&amp;amp;/g, '&')
-        .replace(/&amp;lt;/g, '<')
-        .replace(/&amp;gt;/g, '>');
-    })
+    .map(segment => segment.text)
     .join(' ');
 }
 
 export function getYoutubeVideoId(url) {
-  // If the URL is already just a video ID (11-12 characters, alphanumeric with some special chars)
   if (/^[a-zA-Z0-9_-]{11,12}$/.test(url)) {
     return url;
   }
 
   try {
-    // Handle malformed URLs with double question marks (common in shared links)
     if (url.includes('youtube.com/watch?') && url.indexOf('?') !== url.lastIndexOf('?')) {
-      // Extract video ID from malformed URL using string operations
       const firstQuestionMarkIndex = url.indexOf('?');
       const paramString = url.substring(firstQuestionMarkIndex + 1);
       const params = paramString.split('?')[0].split('&');
-      
+
       for (const param of params) {
         const [key, value] = param.split('=');
         if (key === 'v' && value) {
@@ -106,46 +244,39 @@ export function getYoutubeVideoId(url) {
         }
       }
     }
-    
-    // Standard URL parsing for well-formed URLs
+
     const urlObj = new URL(url);
-    
-    // Handle youtube.com URLs
+
     if (urlObj.hostname.includes('youtube.com')) {
       if (urlObj.pathname === '/watch') {
         return urlObj.searchParams.get('v');
       }
-      
-      // Handle shortened youtube.com URLs like youtube.com/v/VIDEO_ID
+
       if (urlObj.pathname.startsWith('/v/')) {
         return urlObj.pathname.split('/')[2];
       }
     }
-    
-    // Handle youtu.be URLs
+
     if (urlObj.hostname === 'youtu.be') {
-      // Extract the video ID from the pathname, ignoring any query parameters
       const pathParts = urlObj.pathname.split('/');
       return pathParts[1] ? pathParts[1] : null;
     }
-    
+
     return null;
   } catch (error) {
-    // For any parsing errors, attempt manual extraction for common patterns
     try {
       if (url.includes('youtube.com/watch?v=')) {
         const vIndex = url.indexOf('watch?v=');
-        let videoId = url.substring(vIndex + 8); // 8 is the length of 'watch?v='
-        // Trim the ID at the first ? or & if present
+        let videoId = url.substring(vIndex + 8);
         const endIndex = Math.min(
           videoId.indexOf('?') > -1 ? videoId.indexOf('?') : Infinity,
           videoId.indexOf('&') > -1 ? videoId.indexOf('&') : Infinity
         );
-        
+
         if (endIndex !== Infinity) {
           videoId = videoId.substring(0, endIndex);
         }
-        
+
         return videoId || null;
       }
     } catch (e) {
@@ -153,4 +284,4 @@ export function getYoutubeVideoId(url) {
     }
     return null;
   }
-} 
+}

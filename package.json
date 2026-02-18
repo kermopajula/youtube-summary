@@ -6,7 +6,5 @@
     "local": "vercel dev",
     "deploy": "vercel deploy"
   },
-  "dependencies": {
-    "@danielxceron/youtube-transcript": "^1.2.6"
-  }
+  "dependencies": {}
 }
