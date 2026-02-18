@@ -1,4 +1,4 @@
-import Innertube from 'youtubei.js';
+import { Innertube } from 'youtubei.js';
 
 const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
@@ -65,28 +65,28 @@ async function fetchTranscript(videoId) {
 
 async function fetchViaYoutubei(videoId) {
   const yt = await Innertube.create({ generate_session_locally: true });
-  const info = await yt.getInfo(videoId);
-  const transcriptInfo = await info.getTranscript();
+  const info = await yt.getBasicInfo(videoId);
 
-  const segments = transcriptInfo.transcript?.content?.body?.initial_segments || [];
-
-  if (!segments.length) {
-    throw new Error('No transcript segments found');
+  const tracks = info.captions?.caption_tracks;
+  if (!tracks?.length) {
+    throw new Error('No caption tracks in player response');
   }
 
-  return segments
-    .map((seg) => {
-      const renderer = seg.as?.('TranscriptSegment') || seg;
-      const text = renderer.snippet?.text || renderer.snippet?.runs?.map((r) => r.text).join('') || '';
-      if (!text.trim()) return null;
-      return {
-        text: text.trim(),
-        duration: (Number(renderer.end_ms || 0) - Number(renderer.start_ms || 0)) / 1000,
-        offset: Number(renderer.start_ms || 0) / 1000,
-        lang: 'en',
-      };
-    })
-    .filter(Boolean);
+  const track = tracks.find((t) => t.kind === 'asr') || tracks[0];
+  const response = await fetch(track.base_url);
+
+  if (!response.ok) {
+    throw new Error(`Transcript XML fetch failed: ${response.status}`);
+  }
+
+  const body = await response.text();
+  const transcript = parseTranscriptXml(body, track.language_code);
+
+  if (!transcript.length) {
+    throw new Error('Parsed transcript is empty');
+  }
+
+  return transcript;
 }
 
 async function fetchWatchPage(videoId) {
