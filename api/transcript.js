@@ -12,7 +12,16 @@ const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzI
 async function fetchTranscript(videoId) {
   const errors = [];
 
-  // Step 1: Fetch the watch page to get embedded captions and visitor data
+  // Step 1: Fetch the embed page (works reliably from datacenter IPs)
+  // and use it to make an embedded player InnerTube request
+  try {
+    const result = await fetchViaEmbed(videoId);
+    if (result.length) return result;
+  } catch (err) {
+    errors.push(`Embed: ${err.message}`);
+  }
+
+  // Step 2: Fetch the watch page for captions and visitor data
   let pageData = null;
   try {
     pageData = await fetchWatchPage(videoId);
@@ -30,7 +39,7 @@ async function fetchTranscript(videoId) {
     }
   }
 
-  // Step 2: Try InnerTube WEB client with visitor data from the page
+  // Step 3: Try InnerTube WEB client with visitor data from the page
   try {
     const result = await fetchViaInnerTubeClient(videoId, {
       clientName: 'WEB',
@@ -43,7 +52,7 @@ async function fetchTranscript(videoId) {
     errors.push(`InnerTube WEB: ${err.message}`);
   }
 
-  // Step 3: Try InnerTube ANDROID client
+  // Step 4: Try InnerTube ANDROID client
   try {
     const result = await fetchViaInnerTubeClient(videoId, {
       clientName: 'ANDROID',
@@ -57,6 +66,64 @@ async function fetchTranscript(videoId) {
   }
 
   throw new Error(`All methods failed for ${videoId}: ${errors.join('; ')}`);
+}
+
+async function fetchViaEmbed(videoId) {
+  // Fetch the embed page — YouTube serves this to all IPs since embeds
+  // must work on any third-party site
+  const embedResponse = await fetch(`https://www.youtube.com/embed/${videoId}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+  });
+
+  const embedHtml = await embedResponse.text();
+
+  // Extract visitor data and API key from embed page
+  const visitorMatch = embedHtml.match(/"visitorData"\s*:\s*"([^"]+)"/);
+  const visitorData = visitorMatch?.[1];
+
+  const apiKeyMatch = embedHtml.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
+  const apiKey = apiKeyMatch?.[1] || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+
+  if (!visitorData) {
+    throw new Error('No visitor data in embed page');
+  }
+
+  // Make InnerTube request as an embedded player (mimics what the embed iframe does)
+  const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Referer': 'https://www.youtube.com/',
+      'Origin': 'https://www.youtube.com',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'WEB_EMBEDDED_PLAYER',
+          clientVersion: '1.20241126.01.00',
+          visitorData,
+          hl: 'en',
+          gl: 'US',
+        },
+        thirdParty: {
+          embedUrl: 'https://www.google.com',
+        },
+      },
+      videoId,
+    }),
+  });
+
+  const data = await response.json();
+  const captions = data?.captions?.playerCaptionsTracklistRenderer;
+
+  if (!captions || !captions.captionTracks?.length) {
+    throw new Error('No captions in response');
+  }
+
+  return await fetchTranscriptFromCaptions(captions);
 }
 
 async function fetchWatchPage(videoId) {
