@@ -34,8 +34,8 @@ export default async function handler(req) {
   }
 
   try {
-    const transcript = await YoutubeTranscript.fetchTranscript(targetVideoId);
-    
+    const transcript = await YoutubeTranscript.fetchTranscriptWithInnerTube(targetVideoId);
+
     // Format response based on the format parameter
     if (format.toLowerCase() === 'text') {
       const textTranscript = formatTranscriptAsText(transcript);
@@ -57,9 +57,9 @@ export default async function handler(req) {
     }
   } catch (error) {
     console.error('Error fetching transcript:', error);
-    
+
     return new Response(
-      JSON.stringify({ 
+      JSON.stringify({
         error: 'Failed to fetch transcript',
         details: error.message
       }), {
