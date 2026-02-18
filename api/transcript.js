@@ -1,5 +1,3 @@
-import { Innertube } from 'youtubei.js';
-
 const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
 const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
@@ -64,6 +62,7 @@ async function fetchTranscript(videoId) {
 }
 
 async function fetchViaYoutubei(videoId) {
+  const { Innertube } = await import('youtubei.js');
   const yt = await Innertube.create({ generate_session_locally: true });
   const info = await yt.getBasicInfo(videoId);
 
