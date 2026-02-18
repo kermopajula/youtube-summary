@@ -1,168 +1,38 @@
+export const config = {
+  runtime: 'edge',
+};
+
 const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
 const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
 
 const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY';
 
-async function fetchTranscript(videoId) {
-  const errors = [];
-
-  // Step 1: Use youtubei.js (handles session generation and multiple API paths)
-  try {
-    const result = await fetchViaYoutubei(videoId);
-    if (result.length) return result;
-  } catch (err) {
-    errors.push(`youtubei.js: ${err.message}`);
-  }
-
-  // Step 2: Fetch the watch page for embedded captions
-  let pageData = null;
-  try {
-    pageData = await fetchWatchPage(videoId);
-  } catch (err) {
-    errors.push(`Page fetch: ${err.message}`);
-  }
-
-  if (pageData?.captions) {
-    try {
-      const result = await fetchTranscriptFromCaptions(pageData.captions);
-      if (result.length) return result;
-    } catch (err) {
-      errors.push(`Page captions: ${err.message}`);
+/**
+ * Extract captions object from YouTube watch page HTML.
+ */
+function extractCaptionsFromHtml(html) {
+  const parts = html.split('"captions":');
+  if (parts.length <= 1) {
+    if (html.includes('class="g-recaptcha"')) {
+      throw new Error('Rate limited by YouTube (CAPTCHA required)');
     }
+    return null;
   }
 
-  // Step 3: Try InnerTube WEB client with visitor data
   try {
-    const result = await fetchViaInnerTubeClient(videoId, {
-      clientName: 'WEB',
-      clientVersion: '2.20241126.01.00',
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      visitorData: pageData?.visitorData,
-    });
-    if (result.length) return result;
-  } catch (err) {
-    errors.push(`InnerTube WEB: ${err.message}`);
+    const captionsJson = parts[1].split(',"videoDetails')[0].replace('\n', '');
+    const captions = JSON.parse(captionsJson)?.playerCaptionsTracklistRenderer;
+    if (!captions?.captionTracks?.length) return null;
+    return captions;
+  } catch {
+    return null;
   }
-
-  // Step 4: Try InnerTube ANDROID client
-  try {
-    const result = await fetchViaInnerTubeClient(videoId, {
-      clientName: 'ANDROID',
-      clientVersion: '19.29.37',
-      userAgent: 'com.google.android.youtube/19.29.37 (Linux; Android 13)',
-      androidSdkVersion: 33,
-    });
-    if (result.length) return result;
-  } catch (err) {
-    errors.push(`InnerTube ANDROID: ${err.message}`);
-  }
-
-  throw new Error(`All methods failed for ${videoId}: ${errors.join('; ')}`);
 }
 
-async function fetchViaYoutubei(videoId) {
-  const { Innertube } = await import('youtubei.js');
-  const yt = await Innertube.create({ generate_session_locally: true });
-  const info = await yt.getBasicInfo(videoId);
-
-  const tracks = info.captions?.caption_tracks;
-  if (!tracks?.length) {
-    throw new Error('No caption tracks in player response');
-  }
-
-  const track = tracks.find((t) => t.kind === 'asr') || tracks[0];
-  const response = await fetch(track.base_url);
-
-  if (!response.ok) {
-    throw new Error(`Transcript XML fetch failed: ${response.status}`);
-  }
-
-  const body = await response.text();
-  const transcript = parseTranscriptXml(body, track.language_code);
-
-  if (!transcript.length) {
-    throw new Error('Parsed transcript is empty');
-  }
-
-  return transcript;
-}
-
-async function fetchWatchPage(videoId) {
-  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Cookie': CONSENT_COOKIE,
-    },
-  });
-
-  const html = await response.text();
-
-  if (html.includes('class="g-recaptcha"')) {
-    throw new Error('Rate limited by YouTube (CAPTCHA required)');
-  }
-
-  let visitorData = null;
-  const visitorMatch = html.match(/"visitorData"\s*:\s*"([^"]+)"/);
-  if (visitorMatch) {
-    visitorData = visitorMatch[1];
-  }
-
-  let captions = null;
-  const captionsParts = html.split('"captions":');
-  if (captionsParts.length > 1) {
-    try {
-      const captionsJson = captionsParts[1].split(',"videoDetails')[0].replace('\n', '');
-      captions = JSON.parse(captionsJson)?.playerCaptionsTracklistRenderer;
-      if (!captions?.captionTracks?.length) {
-        captions = null;
-      }
-    } catch {
-      // Failed to parse
-    }
-  }
-
-  return { visitorData, captions };
-}
-
-async function fetchViaInnerTubeClient(videoId, clientConfig) {
-  const context = {
-    client: {
-      clientName: clientConfig.clientName,
-      clientVersion: clientConfig.clientVersion,
-      hl: 'en',
-      gl: 'US',
-    },
-  };
-
-  if (clientConfig.androidSdkVersion) {
-    context.client.androidSdkVersion = clientConfig.androidSdkVersion;
-  }
-
-  if (clientConfig.visitorData) {
-    context.client.visitorData = clientConfig.visitorData;
-  }
-
-  const response = await fetch('https://www.youtube.com/youtubei/v1/player', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': clientConfig.userAgent,
-    },
-    body: JSON.stringify({ context, videoId }),
-  });
-
-  const data = await response.json();
-  const captions = data?.captions?.playerCaptionsTracklistRenderer;
-
-  if (!captions || !captions.captionTracks?.length) {
-    throw new Error('No captions in response');
-  }
-
-  return await fetchTranscriptFromCaptions(captions);
-}
-
+/**
+ * Fetch transcript XML from a caption track URL and parse it.
+ */
 async function fetchTranscriptFromCaptions(captions) {
   const track = captions.captionTracks.find((t) => t.kind === 'asr') || captions.captionTracks[0];
   const response = await fetch(track.baseUrl);
@@ -179,6 +49,44 @@ async function fetchTranscriptFromCaptions(captions) {
   }
 
   return transcript;
+}
+
+/**
+ * Server-side fetch: try to get captions directly from YouTube.
+ * This works from residential IPs but may fail from datacenter IPs.
+ */
+async function fetchTranscriptServerSide(videoId) {
+  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cookie': CONSENT_COOKIE,
+    },
+  });
+
+  const html = await response.text();
+  const captions = extractCaptionsFromHtml(html);
+
+  if (!captions) {
+    throw new Error('No captions in page (YouTube may be blocking this server IP)');
+  }
+
+  return await fetchTranscriptFromCaptions(captions);
+}
+
+/**
+ * Client-assisted fetch: parse captions from HTML provided by the client.
+ * The client fetches the YouTube page from their residential IP and POSTs
+ * the HTML here. The timedtext URLs are signed and work from any IP.
+ */
+async function fetchTranscriptFromClientHtml(html) {
+  const captions = extractCaptionsFromHtml(html);
+
+  if (!captions) {
+    throw new Error('No captions found in provided HTML');
+  }
+
+  return await fetchTranscriptFromCaptions(captions);
 }
 
 function parseTranscriptXml(body, lang) {
@@ -226,46 +134,80 @@ function decodeHTMLEntities(text) {
     .replace(/&#x27;/g, "'");
 }
 
-export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+export default async function handler(req) {
+  const url = new URL(req.url);
+  const format = url.searchParams.get('format') || 'json';
 
-  const videoUrl = req.query.url;
-  const videoId = req.query.id;
-  const format = req.query.format || 'json';
+  // POST: client sends YouTube page HTML for parsing
+  if (req.method === 'POST') {
+    try {
+      const html = await req.text();
 
-  let targetVideoId = null;
+      if (!html || html.length < 1000) {
+        return jsonResponse({ error: 'POST body must contain YouTube page HTML' }, 400);
+      }
 
-  if (videoUrl) {
-    targetVideoId = getYoutubeVideoId(videoUrl);
-  } else if (videoId) {
-    targetVideoId = videoId;
-  }
-
-  if (!targetVideoId) {
-    return res.status(400).json({ error: 'Valid YouTube URL or video ID is required' });
-  }
-
-  try {
-    const transcript = await fetchTranscript(targetVideoId);
-
-    res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=600');
-
-    if (format.toLowerCase() === 'text') {
-      const textTranscript = transcript.map((s) => s.text).join(' ');
-      res.setHeader('Content-Type', 'text/plain');
-      return res.status(200).send(textTranscript);
-    } else {
-      return res.status(200).json({ transcript });
+      const transcript = await fetchTranscriptFromClientHtml(html);
+      return transcriptResponse(transcript, format);
+    } catch (error) {
+      return jsonResponse({ error: 'Failed to fetch transcript', details: error.message }, 500);
     }
-  } catch (error) {
-    console.error('Error fetching transcript:', error);
-    return res.status(500).json({
-      error: 'Failed to fetch transcript',
-      details: error.message,
+  }
+
+  // GET: server fetches directly from YouTube (may fail from datacenter IPs)
+  if (req.method === 'GET') {
+    const videoUrl = url.searchParams.get('url');
+    const videoId = url.searchParams.get('id');
+
+    let targetVideoId = null;
+    if (videoUrl) {
+      targetVideoId = getYoutubeVideoId(videoUrl);
+    } else if (videoId) {
+      targetVideoId = videoId;
+    }
+
+    if (!targetVideoId) {
+      return jsonResponse({ error: 'Valid YouTube URL or video ID is required' }, 400);
+    }
+
+    try {
+      const transcript = await fetchTranscriptServerSide(targetVideoId);
+      return transcriptResponse(transcript, format);
+    } catch (error) {
+      return jsonResponse({
+        error: 'Failed to fetch transcript',
+        details: error.message,
+        hint: 'YouTube blocks server IPs. Use POST with the YouTube page HTML instead. Have your client fetch https://www.youtube.com/watch?v=VIDEO_ID and POST the HTML body here.',
+      }, 500);
+    }
+  }
+
+  return jsonResponse({ error: 'Method not allowed' }, 405);
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function transcriptResponse(transcript, format) {
+  const headers = {
+    'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=600',
+  };
+
+  if (format.toLowerCase() === 'text') {
+    return new Response(transcript.map((s) => s.text).join(' '), {
+      status: 200,
+      headers: { ...headers, 'Content-Type': 'text/plain' },
     });
   }
+
+  return new Response(JSON.stringify({ transcript }), {
+    status: 200,
+    headers: { ...headers, 'Content-Type': 'application/json' },
+  });
 }
 
 export function getYoutubeVideoId(url) {

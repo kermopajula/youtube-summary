@@ -4,7 +4,7 @@
     {
       "src": "/api/transcript",
       "dest": "/api/transcript.js",
-      "methods": ["GET"]
+      "methods": ["GET", "POST"]
     }
   ]
 } 
