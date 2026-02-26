@@ -6,7 +6,7 @@ const RE_XML_TRANSCRIPT = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g
 const RE_XML_TRANSCRIPT_ASR = /<p t="(\d+)" d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
 const RE_XML_TRANSCRIPT_ASR_SEGMENT = /<s[^>]*>([^<]*)<\/s>/g;
 
-const CONSENT_COOKIE = 'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgLC_pwY';
+const CONSENT_COOKIE = 'SOCS=CAI';
 
 /**
  * Fetch transcript XML from a caption track URL and parse it.
@@ -131,11 +131,16 @@ export default async function handler(req) {
    *
    * The client (e.g. Apple Shortcuts) should:
    * 1. POST to https://www.youtube.com/youtubei/v1/player with:
-   *    {"context":{"client":{"clientName":"ANDROID","clientVersion":"19.29.37","androidSdkVersion":33,"hl":"en","gl":"US"}},"videoId":"VIDEO_ID"}
+   *    - Headers: Content-Type: application/json
+   *              Cookie: SOCS=CAI
+   *    - Body: {"context":{"client":{"clientName":"ANDROID","clientVersion":"19.29.37","androidSdkVersion":33,"hl":"en","gl":"US"}},"videoId":"VIDEO_ID"}
    * 2. Forward that response body here as a POST.
    *
-   * This works because the client has a residential IP that YouTube trusts,
-   * and the timedtext URLs in the response are signed but not IP-bound.
+   * Notes:
+   * - ANDROID client is the only one that returns captions without PoToken.
+   * - Cookie SOCS=CAI bypasses GDPR consent for EU users (yt-dlp approach).
+   * - This works because the client has a residential IP that YouTube trusts,
+   *   and the timedtext URLs in the response are signed but not IP-bound.
    */
   if (req.method === 'POST') {
     try {
@@ -147,6 +152,19 @@ export default async function handler(req) {
       const parsed = JSON.parse(body);
       // Support both direct response and wrapped (e.g. {"player_response": ...} from Apple Shortcuts)
       const data = parsed.player_response || parsed;
+
+      // Detect GDPR consent page (EU users using ANDROID client without consent cookie)
+      const isConsentPage = data.onResponseReceivedActions?.some(
+        (a) => a.startEomFlowCommand
+      );
+      if (isConsentPage) {
+        return jsonResponse({
+          error: 'GDPR consent page received instead of video data',
+          details: 'YouTube returned a consent page. This typically happens when using the ANDROID client from EU IPs.',
+          fix: 'Add Cookie header "SOCS=CAI" to your YouTube InnerTube request to bypass GDPR consent.',
+        }, 400);
+      }
+
       const track = extractTrackFromPlayerResponse(data);
       const transcript = await fetchTranscriptFromTrackUrl(track.url, track.lang);
       return transcriptResponse(transcript, format);
